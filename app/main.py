@@ -96,27 +96,28 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         user = msg.get("from", {})
 
         # 🟢 أولاً: فحص الملفات قبل أي شيء آخر
+        
         if "document" in msg or "video" in msg:
-            if crud.is_waiting_file(chat_id):
-                if "document" in msg:
-                    file_id = msg["document"]["file_id"]
-                    content_type = "pdf"
-                else:
-                    file_id = msg["video"]["file_id"]
-                    content_type = "video"
+    if crud.is_waiting_file(chat_id):
+        if "document" in msg:
+            file_id = msg["document"]["file_id"]
+            content_type = "pdf"
+        else:
+            file_id = msg["video"]["file_id"]
+            content_type = "video"
 
-                safe_file_id = file_id.replace("-", "\\-").replace("_", "\\_")
-send_message(
-    chat_id,
-    f"✅ تم استلام الملف بنجاح!\n"
-    f"file_id:\n`{safe_file_id}`\n"
-    f"الآن أرسل الأمر التالي لإضافته:\n"
-    f"`/addfile <course> {content_type} {safe_file_id}`",
-    parse_mode="MarkdownV2"
-)
-                crud.set_waiting_file(chat_id, False)
-                logger.info(f"Received file from admin: {file_id} (type={content_type})")
-                return {"ok": True}
+        safe_file_id = file_id.replace("-", "\\-").replace("_", "\\_")
+        send_message(
+            chat_id,
+            f"✅ تم استلام الملف بنجاح!\n"
+            f"file_id:\n`{safe_file_id}`\n"
+            f"الآن أرسل الأمر التالي لإضافته:\n"
+            f"`/addfile <course> {content_type} {safe_file_id}`",
+            parse_mode="MarkdownV2"
+        )
+        crud.set_waiting_file(chat_id, False)
+        logger.info(f"Received file from admin: {file_id} (type={content_type})")
+        return {"ok": True}
 
         # 🔵 ثانياً: معالجة النصوص فقط بعد فحص الملفات
         text = msg.get("text", "")
