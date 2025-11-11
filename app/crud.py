@@ -1,83 +1,73 @@
 # app/crud.py
 import sqlite3
-import os
-import threading
+from typing import Optional
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "bot_data.db")
-lock = threading.Lock()  # لتجنب التعارض عند عدة طلبات
+DB_PATH = "medbot.db"  # قاعدة بيانات دائمة على القرص
 
-# ========= تهيئة قاعدة البيانات والجداول =========
+# ========= تهيئة قاعدة البيانات =========
 def init_db():
-    with lock:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        # جدول المواد
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS materials (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                course TEXT NOT NULL,
-                type TEXT NOT NULL,
-                file_id TEXT NOT NULL
-            )
-        """)
-        # جدول متابعة رفع الملفات
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS waiting_files (
-                chat_id INTEGER PRIMARY KEY,
-                waiting INTEGER NOT NULL
-            )
-        """)
-        conn.commit()
-        conn.close()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # جدول المواد
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS materials (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course TEXT NOT NULL,
+        type TEXT NOT NULL,
+        file_id TEXT NOT NULL
+    )
+    """)
+    
+    # جدول حالة انتظار رفع الملفات
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS waiting_files (
+        chat_id INTEGER PRIMARY KEY,
+        waiting INTEGER DEFAULT 0
+    )
+    """)
+    
+    conn.commit()
+    conn.close()
 
-# ========= إضافة مادة =========
-def add_material(course, content_type, file_id):
-    with lock:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO materials (course, type, file_id)
-            VALUES (?, ?, ?)
-        """, (course, content_type, file_id))
-        conn.commit()
-        conn.close()
+# ========= المواد =========
+def add_material(course: str, content_type: str, file_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # تحقق إذا المادة موجودة لنقوم بالتحديث بدل الإضافة
+    cursor.execute("SELECT id FROM materials WHERE course=? AND type=?", (course, content_type))
+    row = cursor.fetchone()
+    if row:
+        cursor.execute("UPDATE materials SET file_id=? WHERE id=?", (file_id, row[0]))
+    else:
+        cursor.execute("INSERT INTO materials (course, type, file_id) VALUES (?, ?, ?)", (course, content_type, file_id))
+    
+    conn.commit()
+    conn.close()
 
-# ========= جلب مادة =========
-def get_material(course, content_type):
-    with lock:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT file_id FROM materials
-            WHERE course = ? AND type = ?
-            ORDER BY id DESC LIMIT 1
-        """, (course, content_type))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            return {"file_id": row[0]}
-        return None
+def get_material(course: str, content_type: str) -> Optional[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_id FROM materials WHERE course=? AND type=?", (course, content_type))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"file_id": row[0]}
+    return None
 
-# ========= متابعة رفع الملفات =========
-def set_waiting_file(chat_id, waiting=True):
-    with lock:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO waiting_files (chat_id, waiting)
-            VALUES (?, ?)
-            ON CONFLICT(chat_id) DO UPDATE SET waiting=excluded.waiting
-        """, (chat_id, int(waiting)))
-        conn.commit()
-        conn.close()
+# ========= انتظار رفع الملفات =========
+def set_waiting_file(chat_id: int, waiting: bool):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO waiting_files (chat_id, waiting) VALUES (?, ?)", (chat_id, int(waiting)))
+    conn.commit()
+    conn.close()
 
-def is_waiting_file(chat_id):
-    with lock:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT waiting FROM waiting_files WHERE chat_id=?
-        """, (chat_id,))
-        row = cursor.fetchone()
-        conn.close()
-        return bool(row[0]) if row else False
+def is_waiting_file(chat_id: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT waiting FROM waiting_files WHERE chat_id=?", (chat_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
