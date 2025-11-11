@@ -3,12 +3,12 @@ import os
 import requests
 import logging
 from fastapi import FastAPI, Header, HTTPException
-from app import crud  # crud يتعامل الآن مع قاعدة البيانات SQLite
+from app import crud  # CRUD للتعامل مع SQLite
 
 # ========= Logging مفصل =========
 logging.basicConfig(
-    level=logging.DEBUG,  
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ app = FastAPI(title="Med Faculty Bot")
 
 @app.on_event("startup")
 async def startup():
-    crud.init_db()  # تهيئة قاعدة البيانات ورفع الجداول
+    crud.init_db()
     logger.info("Database initialized successfully.")
 
 # ========= دوال مساعدة =========
@@ -53,20 +53,14 @@ def is_admin(user):
 
 # ========= الكيبوردات =========
 def get_main_keyboard(is_admin=False):
-    buttons = [
-        [{"text": "ابدأ 🎓"}],
-        [{"text": "تواصل مع المطور 👨‍💻"}]
-    ]
+    buttons = [[{"text": "ابدأ 🎓"}], [{"text": "تواصل مع المطور 👨‍💻"}]]
     if is_admin:
         buttons.append([{"text": "رفع ملف جديد 📤"}])
     return {"keyboard": buttons, "resize_keyboard": True}
 
 def get_courses_keyboard():
     return {
-        "keyboard": [
-            [{"text": "📘 التشريح"}, {"text": "🧠 الفسيولوجي"}],
-            [{"text": "🏠 القائمة الرئيسية"}]
-        ],
+        "keyboard": [[{"text": "📘 التشريح"}, {"text": "🧠 الفسيولوجي"}], [{"text": "🏠 القائمة الرئيسية"}]],
         "resize_keyboard": True
     }
 
@@ -80,7 +74,7 @@ def get_types_keyboard(course):
     }
 
 # ========= Webhook الرئيسي =========
-    @app.post("/webhook")
+@app.post("/webhook")
 async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(None)):
     try:
         if WEBHOOK_SECRET_TOKEN and x_telegram_bot_api_secret_token != WEBHOOK_SECRET_TOKEN:
@@ -96,36 +90,51 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         text = msg.get("text", "")
         user = msg.get("from", {})
 
-        # 🟢 أولًا: التعامل مع الملفات قبل أي شيء آخر
-        if "document" in msg or "video" in msg:
-            if crud.is_waiting_file(chat_id):
-                if "document" in msg:
-                    file_id = msg["document"]["file_id"]
-                    content_type = "pdf"
-                else:
-                    file_id = msg["video"]["file_id"]
-                    content_type = "video"
+        # ========= التعامل مع الملفات (عادية أو forwarded) =========
+        file_info = None
+        content_type = None
 
-                # حماية MarkdownV2
-                safe_file_id = file_id.replace("-", "\\-").replace("_", "\\_")
+        if "document" in msg:
+            file_info = msg["document"]
+            content_type = "pdf"
+        elif "video" in msg:
+            file_info = msg["video"]
+            content_type = "video"
+        elif "forward_from_message_id" in msg or "forward_from_chat" in msg:
+            # تحقق إذا كان forward يحتوي على ملف
+            if "document" in msg:
+                file_info = msg["document"]
+                content_type = "pdf"
+            elif "video" in msg:
+                file_info = msg["video"]
+                content_type = "video"
 
-                send_message(
-                    chat_id,
-                    f"✅ تم استلام الملف بنجاح!\n"
-                    f"file_id:\n`{safe_file_id}`\n"
-                    f"الآن أرسل الأمر التالي لإضافته:\n"
-                    f"`/addfile <course> {content_type} {safe_file_id}`",
-                    parse_mode="MarkdownV2"
-                )
-                crud.set_waiting_file(chat_id, False)
-                logger.info(f"Received file from admin: {file_id} (type={content_type})")
-                return {"ok": True}
+        if file_info and crud.is_waiting_file(chat_id):
+            file_id = file_info["file_id"]
+            # تهريب MarkdownV2
+            safe_file_id = file_id.replace("-", "\\-").replace("_", "\\_")
+
+            # حفظ الملف تلقائيًا في قاعدة البيانات
+            crud.add_material("unknown_course", content_type, file_id)  # مؤقتًا، يمكن تعديل course لاحقًا
+
+            send_message(
+                chat_id,
+                f"✅ تم استلام الملف بنجاح!\n"
+                f"file_id:\n`{safe_file_id}`\n"
+                f"الآن أرسل الأمر التالي لإضافته:\n"
+                f"`/addfile <course> {content_type} {safe_file_id}`",
+                parse_mode="MarkdownV2"
+            )
+            crud.set_waiting_file(chat_id, False)
+            logger.info(f"Received file from admin: {file_id} (type={content_type})")
+            return {"ok": True}
+
         # ========= أوامر الأدمن =========
         if text.startswith("/addfile") and is_admin(user):
             parts = text.split()
             if len(parts) == 4:
                 course, ctype, file_id = parts[1], parts[2], parts[3]
-                crud.add_material(course, ctype, file_id)  # يخزن في SQLite
+                crud.add_material(course, ctype, file_id)
                 send_message(chat_id, f"✅ تمت إضافة {ctype} لمادة {course} بنجاح!", parse_mode=None)
                 logger.info(f"Admin added file: course={course}, type={ctype}, file_id={file_id}")
             else:
@@ -140,71 +149,38 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             logger.info(f"Admin {user.get('username')} is uploading a file.")
             return {"ok": True}
 
-        if "document" in msg or "video" in msg:
-            if crud.is_waiting_file(chat_id):
-                if "document" in msg:
-                    file_id = msg["document"]["file_id"]
-                    content_type = "pdf"
-                else:
-                    file_id = msg["video"]["file_id"]
-                    content_type = "video"
-
-                send_message(chat_id,
-                             f"✅ تم استلام الملف بنجاح!\nfile_id:\n`{file_id}`\nالآن أرسل الأمر التالي لإضافته:\n`/addfile <course> {content_type} {file_id}`",
-                             parse_mode=None
-                             )
-                crud.set_waiting_file(chat_id, False)
-                logger.info(f"Received file from admin: {file_id} (type={content_type})")
-                return {"ok": True}
-
         # ========= أوامر المستخدم =========
         if text.startswith("/start"):
-            welcome_text = (
-                "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل!\n"
-                "البوت في مراحل الصيانة والتجهيزات لتوفير كل المواد بأداء مستقر.\n"
-                "اختر من القائمة أدناه:"
-            )
-            send_message(chat_id, welcome_text, reply_markup=get_main_keyboard(is_admin(user)), parse_mode=None)
+            send_message(chat_id, "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل!\nاختر من القائمة أدناه:",
+                         reply_markup=get_main_keyboard(is_admin(user)), parse_mode=None)
             return {"ok": True}
 
         if text == "تواصل مع المطور 👨‍💻":
             send_message(chat_id, f"📩 يمكنك التواصل مع المطور عبر الحساب التالي:\n{ADMIN_USERNAME}", parse_mode=None)
-            logger.info(f"User requested developer contact: {chat_id}")
             return {"ok": True}
 
         if text == "🏠 القائمة الرئيسية":
             send_message(chat_id, "🏠 عدت إلى القائمة الرئيسية",
-                         reply_markup=get_main_keyboard(is_admin(user)),
-                         parse_mode=None)
+                         reply_markup=get_main_keyboard(is_admin(user)), parse_mode=None)
             return {"ok": True}
 
         if text == "ابدأ 🎓":
-            send_message(chat_id, "📚 اختر المقرر الدراسي:",
-                         reply_markup=get_courses_keyboard(),
-                         parse_mode=None)
+            send_message(chat_id, "📚 اختر المقرر الدراسي:", reply_markup=get_courses_keyboard(), parse_mode=None)
             return {"ok": True}
 
         if text in ["📘 التشريح", "🧠 الفسيولوجي"]:
             course = "تشريح" if "التشريح" in text else "فسيولوجي"
-            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {course}:",
-                         reply_markup=get_types_keyboard(course),
-                         parse_mode=None)
+            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {course}:", reply_markup=get_types_keyboard(course), parse_mode=None)
             return {"ok": True}
 
         if text == "⬅️ رجوع":
-            send_message(chat_id, "⬅️ رجعت لاختيار المقرر:",
-                         reply_markup=get_courses_keyboard(),
-                         parse_mode=None)
+            send_message(chat_id, "⬅️ رجعت لاختيار المقرر:", reply_markup=get_courses_keyboard(), parse_mode=None)
             return {"ok": True}
 
         # ========= اختيار نوع المحتوى =========
         if any(x in text for x in ["PDF", "فيديو", "مرجع"]):
             parts = text.split()
-            if not parts:
-                send_message(chat_id, "❌ لم يتم التعرف على المقرر.", parse_mode=None)
-                return {"ok": True}
             course_name = parts[0]
-
             if "PDF" in text:
                 content_type = "pdf"
             elif "فيديو" in text:
@@ -212,18 +188,15 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             else:
                 content_type = "reference"
 
-            mat = crud.get_material(course_name, content_type)  # يسترجع من SQLite
+            mat = crud.get_material(course_name, content_type)
             if mat and mat.get("file_id"):
                 send_message(chat_id, f"📨 جارٍ إرسال {content_type} الخاص بمقرر {course_name}...", parse_mode=None)
                 send_file(chat_id, mat["file_id"], content_type)
-                logger.info(f"Sent {content_type} for course {course_name} to {chat_id}")
             else:
                 send_message(chat_id, "🚧 لم يتم العثور على هذا المحتوى بعد.", parse_mode=None)
-                logger.warning(f"Content not found: course={course_name}, type={content_type}")
             return {"ok": True}
 
         send_message(chat_id, "🤔 لم أفهم الأمر، يرجى اختيار من القائمة.", parse_mode=None)
-        logger.info(f"Unknown command from {chat_id}: {text}")
         return {"ok": True}
 
     except Exception as e:
