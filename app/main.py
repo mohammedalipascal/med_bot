@@ -32,6 +32,34 @@ def send_file(chat_id, file_id, content_type="pdf"):
 def is_admin(user):
     return user.get("username") == ADMIN_USERNAME.replace("@", "")
 
+# ---------- إنشاء Keyboards ----------
+def get_main_keyboard(is_admin=False):
+    buttons = [
+        [{"text": "ابدأ 🎓"}],
+        [{"text": "تواصل مع المطور 👨‍💻"}]
+    ]
+    if is_admin:
+        buttons.append([{"text": "رفع ملف جديد 📤"}])
+    return {"keyboard": buttons, "resize_keyboard": True}
+
+def get_courses_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "📘 التشريح"}, {"text": "🧠 الفسيولوجي"}],
+            [{"text": "🏠 القائمة الرئيسية"}]
+        ],
+        "resize_keyboard": True
+    }
+
+def get_types_keyboard(course):
+    return {
+        "keyboard": [
+            [{"text": f"{course} 📄 PDF"}, {"text": f"{course} 🎥 فيديو"}, {"text": f"{course} 📚 مرجع"}],
+            [{"text": "⬅️ رجوع"}, {"text": "🏠 القائمة الرئيسية"}]
+        ],
+        "resize_keyboard": True
+    }
+
 # ---------- Webhook ----------
 @app.post("/webhook")
 async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(None)):
@@ -47,7 +75,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
     user = msg.get("from", {})
 
     # ----------------- أوامر الأدمن -----------------
-    # إضافة ملف جديد داخل البوت
+    # إضافة ملف جديد
     if text.startswith("/addfile") and is_admin(user):
         parts = text.split()
         if len(parts) == 4:
@@ -58,14 +86,13 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             send_message(chat_id, "❌ الصيغة الصحيحة:\n`/addfile <course> <type> <file_id>`")
         return {"ok": True}
 
-    # ----- زر رفع ملف جديد للأدمن -----
-    if text == "رفع ملف جديد 📤" and is_admin(user):
-        buttons = {"keyboard": [[{"text": "🏠 القائمة الرئيسية"}]], "resize_keyboard": True}
-        send_message(chat_id, "📤 أرسل الآن الملف (PDF / فيديو) للبوت، وسأعطيك file_id مباشرة.", reply_markup=buttons)
+    # رفع ملف جديد
+    if text.strip() == "رفع ملف جديد 📤" and is_admin(user):
+        send_message(chat_id, "📤 أرسل الآن الملف (PDF / فيديو) للبوت، وسأعطيك file_id مباشرة.")
         crud.set_waiting_file(chat_id, True)
         return {"ok": True}
 
-    # ----- استقبال الملف بعد الضغط على زر رفع ملف جديد -----
+    # استقبال الملف بعد /upload
     if "document" in msg or "video" in msg:
         if crud.is_waiting_file(chat_id):
             if "document" in msg:
@@ -74,7 +101,6 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             else:
                 file_id = msg["video"]["file_id"]
                 content_type = "video"
-
             send_message(chat_id,
                 f"✅ تم استلام الملف بنجاح!\nfile_id:\n`{file_id}`\nالآن أرسل الأمر التالي لإضافة الملف للمقرر:\n`/addfile <course> {content_type} {file_id}`"
             )
@@ -82,72 +108,30 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             return {"ok": True}
 
     # ----------------- أوامر المستخدم -----------------
-    # /start
     if text.startswith("/start"):
-        buttons = {
-            "keyboard": [
-                [{"text": "ابدأ 🎓"}],
-                [{"text": "تواصل مع المطور 👨‍💻"}],
-                [{"text": "رفع ملف جديد 📤"}] if is_admin(user) else []
-            ],
-            "resize_keyboard": True
-        }
-        send_message(chat_id, "مرحبًا بك في *بوت كلية الطب – جامعة المناقل!* 👋\nاختر من القائمة:", reply_markup=buttons)
+        send_message(chat_id, "مرحبًا بك في *بوت كلية الطب – جامعة المناقل!* 👋\nاختر من القائمة:",
+                     reply_markup=get_main_keyboard(is_admin(user)))
         return {"ok": True}
 
-    # تواصل مع المطور
     if text.strip() == "تواصل مع المطور 👨‍💻":
         send_message(chat_id, f"📩 يمكنك التواصل مع المطور عبر الحساب التالي:\n{ADMIN_USERNAME}")
         return {"ok": True}
 
-    # العودة للقائمة الرئيسية
     if text == "🏠 القائمة الرئيسية":
-        buttons = {
-            "keyboard": [
-                [{"text": "ابدأ 🎓"}],
-                [{"text": "تواصل مع المطور 👨‍💻"}],
-                [{"text": "رفع ملف جديد 📤"}] if is_admin(user) else []
-            ],
-            "resize_keyboard": True
-        }
-        send_message(chat_id, "عدت إلى القائمة الرئيسية 🏠", reply_markup=buttons)
+        send_message(chat_id, "عدت إلى القائمة الرئيسية 🏠", reply_markup=get_main_keyboard(is_admin(user)))
         return {"ok": True}
 
-    # بعد الضغط على ابدأ
     if text == "ابدأ 🎓":
-        buttons = {
-            "keyboard": [
-                [{"text": "📘 التشريح"}, {"text": "🧠 الفسيولوجي"}],
-                [{"text": "🏠 القائمة الرئيسية"}]
-            ],
-            "resize_keyboard": True
-        }
-        send_message(chat_id, "اختر المقرر الدراسي:", reply_markup=buttons)
+        send_message(chat_id, "اختر المقرر الدراسي:", reply_markup=get_courses_keyboard())
         return {"ok": True}
 
-    # اختيار مقرر
     if text in ["📘 التشريح", "🧠 الفسيولوجي"]:
         course = "تشريح" if "التشريح" in text else "فسيولوجي"
-        buttons = {
-            "keyboard": [
-                [{"text": f"{course} 📄 PDF"}, {"text": f"{course} 🎥 فيديو"}, {"text": f"{course} 📚 مرجع"}],
-                [{"text": "⬅️ رجوع"}, {"text": "🏠 القائمة الرئيسية"}]
-            ],
-            "resize_keyboard": True
-        }
-        send_message(chat_id, f"اختر نوع المحتوى لمقرر *{course}*:", reply_markup=buttons)
+        send_message(chat_id, f"اختر نوع المحتوى لمقرر *{course}*:", reply_markup=get_types_keyboard(course))
         return {"ok": True}
 
-    # زر الرجوع
     if text == "⬅️ رجوع":
-        buttons = {
-            "keyboard": [
-                [{"text": "📘 التشريح"}, {"text": "🧠 الفسيولوجي"}],
-                [{"text": "🏠 القائمة الرئيسية"}]
-            ],
-            "resize_keyboard": True
-        }
-        send_message(chat_id, "رجعت لاختيار المقرر ⬅️", reply_markup=buttons)
+        send_message(chat_id, "رجعت لاختيار المقرر ⬅️", reply_markup=get_courses_keyboard())
         return {"ok": True}
 
     # اختيار نوع المحتوى
