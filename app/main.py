@@ -8,7 +8,7 @@ from app import crud
 
 # ========= Logging مفصل =========
 logging.basicConfig(
-    level=logging.DEBUG,  # DEBUG = كل شيء، INFO = أقل تفصيلًا
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -28,10 +28,6 @@ async def startup():
 
 # ========= دوال مساعدة =========
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
-    """
-    إرسال رسالة إلى Telegram. 
-    parse_mode = "Markdown" أو "MarkdownV2" أو None
-    """
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
@@ -102,6 +98,30 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         text = msg.get("text", "")
         user = msg.get("from", {})
 
+        # ========= دعم الملفات العادية أو المعاد توجيهها =========
+        file_data = None
+        content_type = None
+
+        if "document" in msg:
+            file_data = msg["document"]
+            content_type = "pdf"
+        elif "video" in msg:
+            file_data = msg["video"]
+            content_type = "video"
+        elif "photo" in msg:
+            file_data = msg["photo"][-1]
+            content_type = "photo"
+
+        if file_data and crud.is_waiting_file(chat_id):
+            file_id = file_data["file_id"]
+            send_message(chat_id,
+                f"✅ تم استلام الملف بنجاح!\nfile_id:\n`{file_id}`\nالآن أرسل الأمر التالي لإضافته:\n`/addfile <course> {content_type} {file_id}`",
+                parse_mode=None
+            )
+            crud.set_waiting_file(chat_id, False)
+            logger.info(f"Received file from admin: {file_id} (type={content_type})")
+            return {"ok": True}
+
         if not text:
             send_message(chat_id, "⚠️ لم أفهم الرسالة.", parse_mode=None)
             return {"ok": True}
@@ -126,23 +146,6 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             crud.set_waiting_file(chat_id, True)
             logger.info(f"Admin {user.get('username')} is uploading a file.")
             return {"ok": True}
-
-        if "document" in msg or "video" in msg:
-            if crud.is_waiting_file(chat_id):
-                if "document" in msg:
-                    file_id = msg["document"]["file_id"]
-                    content_type = "pdf"
-                else:
-                    file_id = msg["video"]["file_id"]
-                    content_type = "video"
-
-                send_message(chat_id,
-                    f"✅ تم استلام الملف بنجاح!\nfile_id:\n`{file_id}`\nالآن أرسل الأمر التالي لإضافته:\n`/addfile <course> {content_type} {file_id}`",
-                    parse_mode=None
-                )
-                crud.set_waiting_file(chat_id, False)
-                logger.info(f"Received file from admin: {file_id} (type={content_type})")
-                return {"ok": True}
 
         # ========= أوامر المستخدم =========
         if text.startswith("/start"):
