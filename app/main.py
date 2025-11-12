@@ -7,7 +7,6 @@ from fastapi import FastAPI, Header, HTTPException
 from app import crud  # CRUD للتعامل مع SQLite
 
 # ========= Logging مفصل =========
-
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -15,7 +14,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========= الإعدادات الأساسية =========
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", None)
 ADMIN_USERNAME = "@Mgdad_Ali"
@@ -29,7 +27,6 @@ async def startup():
     logger.info("Database initialized successfully.")
 
 # ========= دوال مساعدة =========
-
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
@@ -56,7 +53,6 @@ def is_admin(user):
     return user.get("username") == ADMIN_USERNAME.replace("@", "")
 
 # ========= الكيبوردات =========
-
 def get_main_keyboard(is_admin=False):
     buttons = [[{"text": "ابدأ 🎓"}], [{"text": "تواصل مع المطور 👨‍💻"}]]
     if is_admin:
@@ -79,7 +75,6 @@ def get_types_keyboard(course):
     }
 
 # ========= Webhook الرئيسي =========
-
 @app.post("/webhook")
 async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(None)):
     try:
@@ -100,6 +95,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         file_info = None  
         content_type = None  
 
+        # الملفات العادية
         if "document" in msg:  
             file_info = msg["document"]  
             content_type = "pdf"  
@@ -107,31 +103,48 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             file_info = msg["video"]  
             content_type = "video"  
 
-        # تحقق من الملفات الموجهة (forwarded)  
-        elif "forward_from_message_id" in msg or "forward_from_chat" in msg:  
+        # الملفات المعاد توجيهها (forwarded)
+        elif "forward_from_message_id" in msg or "forward_from_chat" in msg or "forward_from" in msg or "forward_origin" in msg:
+            # جرب أخذ الملف مباشرة إذا موجود
             if "document" in msg:  
                 file_info = msg["document"]  
                 content_type = "pdf"  
             elif "video" in msg:  
                 file_info = msg["video"]  
                 content_type = "video"  
+            # تحقق من forward_origin أو forward_from_message_id
+            elif "forward_origin" in msg:
+                origin = msg["forward_origin"]  
+                fmsg = origin.get("message", {})  
+                if "document" in fmsg:  
+                    file_info = fmsg["document"]  
+                    content_type = "pdf"  
+                elif "video" in fmsg:  
+                    file_info = fmsg["video"]  
+                    content_type = "video"  
+            elif "forward_from" in msg:
+                fmsg = msg
+                if "document" in fmsg:  
+                    file_info = fmsg["document"]  
+                    content_type = "pdf"  
+                elif "video" in fmsg:  
+                    file_info = fmsg["video"]  
+                    content_type = "video"  
 
-        if file_info and crud.is_waiting_file(chat_id):  
-            file_id = file_info["file_id"]  
+        # حفظ الملف مؤقتًا إذا كان البوت في وضع انتظار
+        if file_info and crud.is_waiting_file(chat_id):
+            file_id = file_info["file_id"]
+            crud.set_waiting_file_fileid(chat_id, file_id, content_type)
 
-            # حفظ الملف تلقائيًا في قاعدة البيانات  
-            crud.add_material("unknown_course", content_type, file_id)  # يمكن تعديل course لاحقًا  
-
-            send_message(  
-                chat_id,  
-                f"✅ تم استلام الملف بنجاح!\n"  
-                f"file_id:\n{file_id}\n"  
-                f"الآن أرسل الأمر التالي لإضافته:\n"  
-                f"/addfile <course> {content_type} {file_id}"  
-            )  
-            crud.set_waiting_file(chat_id, False)  
-            logger.info(f"Received file from admin: {file_id} (type={content_type})")  
-            return {"ok": True}  
+            send_message(
+                chat_id,
+                f"✅ تم استلام الملف بنجاح!\n"
+                f"file_id:\n{file_id}\n"
+                f"الآن أرسل الأمر التالي لإضافته:\n"
+                f"/addfile <course> {content_type} {file_id}"
+            )
+            logger.info(f"Received file from admin: {file_id} (type={content_type})")
+            return {"ok": True}
 
         # ========= أوامر الأدمن =========  
         if text.startswith("/addfile") and is_admin(user):  
@@ -146,20 +159,19 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             return {"ok": True}  
 
         if text == "رفع ملف جديد 📤" and is_admin(user):  
-            send_message(chat_id,  
-                         "📤 أرسل الآن الملف (PDF / فيديو) للبوت، وسأعطيك file_id مباشرة.")  
+            send_message(chat_id, "📤 أرسل الآن الملف (PDF / فيديو) للبوت، وسأعطيك file_id مباشرة.")  
             crud.set_waiting_file(chat_id, True)  
             logger.info(f"Admin {user.get('username')} is uploading a file.")  
             return {"ok": True}  
 
         # ========= أوامر المستخدم =========  
         if text.startswith("/start"):  
-            send_message(chat_id, "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل\n\n"  
-    "📚 هذا البوت صُمم لمساعدتك في الوصول إلى كل محتوى ومقررات الطب بسهولة:\n"  
-    "📝 فيديوهات تعليمية\n"  
-    "📄 ملفات PDF\n"  
-    "📚 مراجع علمية\n\n"  
-    "⚠️ تنويه البوت حالياً في مراحل الصيانة والتجهيز لتوفير كل المواد بأداء مستقر.\n\n",  
+            send_message(chat_id, "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل\n\n"
+    "📚 هذا البوت صُمم لمساعدتك في الوصول إلى كل محتوى ومقررات الطب بسهولة:\n"
+    "📝 فيديوهات تعليمية\n"
+    "📄 ملفات PDF\n"
+    "📚 مراجع علمية\n\n"
+    "⚠️ تنويه البوت حالياً في مراحل الصيانة والتجهيز لتوفير كل المواد بأداء مستقر.\n\n",
                          reply_markup=get_main_keyboard(is_admin(user)))  
             return {"ok": True}  
 
@@ -168,8 +180,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             return {"ok": True}  
 
         if text == "🏠 القائمة الرئيسية":  
-            send_message(chat_id, "🏠 عدت إلى القائمة الرئيسية",  
-                         reply_markup=get_main_keyboard(is_admin(user)))  
+            send_message(chat_id, "🏠 عدت إلى القائمة الرئيسية", reply_markup=get_main_keyboard(is_admin(user)))  
             return {"ok": True}  
 
         if text == "ابدأ 🎓":  
