@@ -92,59 +92,41 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         user = msg.get("from", {})  
 
         # ========= التعامل مع الملفات (عادية أو forwarded) =========  
-        file_info = None  
-        content_type = None  
+        # ========= التعامل مع الملفات (عادية أو forwarded) =========
+file_info = None
+content_type = None
 
-        # الملفات العادية
-        if "document" in msg:  
-            file_info = msg["document"]  
-            content_type = "pdf"  
-        elif "video" in msg:  
-            file_info = msg["video"]  
-            content_type = "video"  
+# إذا أرسل المستخدم ملف عادي
+if "document" in msg:
+    file_info = msg["document"]
+    content_type = "pdf"
+elif "video" in msg:
+    file_info = msg["video"]
+    content_type = "video"
 
-        # الملفات المعاد توجيهها (forwarded)
-        elif "forward_from_message_id" in msg or "forward_from_chat" in msg or "forward_from" in msg or "forward_origin" in msg:
-            # جرب أخذ الملف مباشرة إذا موجود
-            if "document" in msg:  
-                file_info = msg["document"]  
-                content_type = "pdf"  
-            elif "video" in msg:  
-                file_info = msg["video"]  
-                content_type = "video"  
-            # تحقق من forward_origin أو forward_from_message_id
-            elif "forward_origin" in msg:
-                origin = msg["forward_origin"]  
-                fmsg = origin.get("message", {})  
-                if "document" in fmsg:  
-                    file_info = fmsg["document"]  
-                    content_type = "pdf"  
-                elif "video" in fmsg:  
-                    file_info = fmsg["video"]  
-                    content_type = "video"  
-            elif "forward_from" in msg:
-                fmsg = msg
-                if "document" in fmsg:  
-                    file_info = fmsg["document"]  
-                    content_type = "pdf"  
-                elif "video" in fmsg:  
-                    file_info = fmsg["video"]  
-                    content_type = "video"  
+# تحقق من الملفات الموجهة (forwarded) بجميع أشكالها
+elif "forward_from" in msg or "forward_origin" in msg:
+    if "document" in msg:
+        file_info = msg["document"]
+        content_type = "pdf"
+    elif "video" in msg:
+        file_info = msg["video"]
+        content_type = "video"
 
-        # حفظ الملف مؤقتًا إذا كان البوت في وضع انتظار
-        if file_info and crud.is_waiting_file(chat_id):
-            file_id = file_info["file_id"]
-            crud.set_waiting_file_fileid(chat_id, file_id, content_type)
-
-            send_message(
-                chat_id,
-                f"✅ تم استلام الملف بنجاح!\n"
-                f"file_id:\n{file_id}\n"
-                f"الآن أرسل الأمر التالي لإضافته:\n"
-                f"/addfile <course> {content_type} {file_id}"
-            )
-            logger.info(f"Received file from admin: {file_id} (type={content_type})")
-            return {"ok": True}
+# ✅ لو لقى فيديو أو PDF
+if file_info and crud.is_waiting_file(chat_id):
+    file_id = file_info["file_id"]
+    crud.add_material("unknown_course", content_type, file_id)
+    send_message(
+        chat_id,
+        f"✅ تم استلام الملف بنجاح!\n"
+        f"file_id:\n{file_id}\n"
+        f"الآن أرسل الأمر التالي لإضافته:\n"
+        f"/addfile <course> {content_type} {file_id}"
+    )
+    crud.set_waiting_file(chat_id, False)
+    logger.info(f"Received file from admin: {file_id} (type={content_type})")
+    return {"ok": True}
 
         # ========= أوامر الأدمن =========  
         if text.startswith("/addfile") and is_admin(user):  
