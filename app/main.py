@@ -104,15 +104,13 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         file_info = None
         content_type = None
 
-        # ملفات عادية
+        # التقاط أي ملف PDF أو فيديو (سواء مباشر أو موجه)
         if "document" in msg:
             file_info = msg["document"]
             content_type = "pdf"
         elif "video" in msg:
             file_info = msg["video"]
             content_type = "video"
-
-        # ملفات موجهة (forwarded) — لجميع الحالات الممكنة
         elif "forward_from" in msg or "forward_origin" in msg:
             if "document" in msg:
                 file_info = msg["document"]
@@ -121,22 +119,20 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 file_info = msg["video"]
                 content_type = "video"
 
-        # حفظ الملف لو البوت ينتظر رفع
-        if file_info and crud.is_waiting_file(chat_id):
+        # إذا تم إرسال ملف من الأدمن — يتم التعامل معه فورًا
+        if file_info and is_admin(user):
             file_id = file_info["file_id"]
-
-            crud.add_material("unknown_course", content_type, file_id)
 
             send_message(
                 chat_id,
                 f"✅ تم استلام الملف بنجاح!\n"
                 f"📎 file_id:\n`{file_id}`\n\n"
-                f"الآن أرسل الأمر التالي لإضافته للمقرر:\n"
+                f"لربطه بمقرر معين استخدم:\n"
                 f"/addfile <course> {content_type} {file_id}",
                 parse_mode="Markdown"
             )
+            logger.info(f"Admin sent file: {file_id} (type={content_type})")
             crud.set_waiting_file(chat_id, False)
-            logger.info(f"Received file from admin: {file_id} (type={content_type})")
             return {"ok": True}
 
         # ========= أوامر الأدمن =========
