@@ -24,30 +24,17 @@ creds_info = json.loads(SERVICE_ACCOUNT_JSON)
 credentials = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
 client = gspread.authorize(credentials)
 
-# ===== كاش داخلي =====
-CACHE = {
-    "materials": {"data": [], "last_update": 0},
-    "waiting_files": {"data": [], "last_update": 0},
-}
-CACHE_TTL = 10  # ثواني: مدة صلاحية الكاش
+# ===== كاش داخلي لتقليل طلبات القراءة =====
+_cache = {}
+CACHE_TTL = 60  # ثواني
 
-def refresh_cache(sheet_name):
-    now = time.time()
-    if now - CACHE[sheet_name]["last_update"] > CACHE_TTL:
-        sheet = client.open(GOOGLE_SHEET_NAME).worksheet(sheet_name)
-        CACHE[sheet_name]["data"] = sheet.get_all_records()
-        CACHE[sheet_name]["last_update"] = now
+def _get_cache(key):
+    if key in _cache and (time.time() - _cache[key]['time'] < CACHE_TTL):
+        return _cache[key]['value']
+    return None
 
-def get_materials_cached(course, type_):
-    refresh_cache("materials")
-    return [
-        row for row in CACHE["materials"]["data"]
-        if str(row.get("course")) == str(course) and str(row.get("type")) == str(type_)
-    ]
-
-def get_waiting_files_cached():
-    refresh_cache("waiting_files")
-    return CACHE["waiting_files"]["data"]
+def _set_cache(key, value):
+    _cache[key] = {'value': value, 'time': time.time()}
 
 # ===== تهيئة الورقة =====
 def init_db():
@@ -96,92 +83,132 @@ def init_db():
         except Exception as e:
             print(f"❌ خطأ أثناء التهيئة: {e}")
 
-# ========== مواد دائمة =========
+# ========== مواد دائمة ==========
 def add_material(course, type_, file_id, doctor=None):
     with LOCK:
         try:
             sheet = client.open(GOOGLE_SHEET_NAME).worksheet("materials")
             created_at = datetime.utcnow().isoformat()
             sheet.append_row([course, type_, file_id, doctor or "", created_at])
-            # تحديث الكاش بعد الإضافة
-            CACHE["materials"]["data"].append({
-                "course": course,
-                "type": type_,
-                "file_id": file_id,
-                "doctor": doctor or "",
-                "created_at": created_at
-            })
+            # تحديث الكاش
+            _cache.pop("materials", None)
         except Exception as e:
             print(f"❌ خطأ أثناء إضافة المادة: {e}")
 
-def get_materials(course, type_):
-    return get_materials_cached(course, type_)
+def get_materials(course, type_, use_cache=False):
+    key = "materials"
+    if use_cache:
+        cached = _get_cache(key)
+        if cached:
+            rows = cached
+        else:
+            rows = _fetch_materials_from_sheet()
+            _set_cache(key, rows)
+    else:
+        rows = _fetch_materials_from_sheet()
+    results = [
+        {"course": row.get("course"), "type": row.get("type"),
+         "file_id": row.get("file_id"), "doctor": row.get("doctor"),
+         "created_at": row.get("created_at")}
+        for row in rows
+        if str(row.get("course")) == str(course) and str(row.get("type")) == str(type_)
+    ]
+    return results
 
-def get_doctors_for_course_and_type(course, type_):
-    refresh_cache("materials")
+def _fetch_materials_from_sheet():
+    with LOCK:
+        try:
+            sheet = client.open(GOOGLE_SHEET_NAME).worksheet("materials")
+            return sheet.get_all_records()
+        except Exception as e:
+            print(f"❌ خطأ أثناء جلب المواد: {e}")
+            return []
+
+def get_doctors_for_course_and_type(course, type_, use_cache=False):
+    key = f"doctors_{course}_{type_}"
+    if use_cache:
+        cached = _get_cache(key)
+        if cached:
+            return cached
+    rows = _fetch_materials_from_sheet()
     doctors = []
-    for row in CACHE["materials"]["data"]:
+    for row in rows:
         if str(row.get("course")) == str(course) and str(row.get("type")) == str(type_):
             d = row.get("doctor") or ""
             if d and d not in doctors:
                 doctors.append(d)
+    if use_cache:
+        _set_cache(key, doctors)
     return doctors
 
-# ======= الملفات المؤقتة (قبل تحديد المقرر) =======
+# ======= الملفات المؤقتة =======
 def set_waiting_file(chat_id, flag):
     with LOCK:
         sheet = client.open(GOOGLE_SHEET_NAME).worksheet("waiting_files")
+        all_rows = sheet.get_all_records()
         if not flag:
-            # إعادة كتابة جميع الصفوف بدون هذا chat_id
-            all_rows = get_waiting_files_cached()
             new_rows = [r for r in all_rows if str(r.get("chat_id")) != str(chat_id)]
             sheet.clear()
             sheet.append_row(["chat_id", "file_id", "type", "doctor"])
             for row in new_rows:
                 sheet.append_row([row.get("chat_id"), row.get("file_id"), row.get("type"), row.get("doctor") or ""])
-            # تحديث الكاش
-            CACHE["waiting_files"]["data"] = new_rows
-            CACHE["waiting_files"]["last_update"] = time.time()
         else:
-            # إضافة صف مؤقت إذا لم يكن موجود
-            all_rows = get_waiting_files_cached()
             for r in all_rows:
                 if str(r.get("chat_id")) == str(chat_id):
                     return
             sheet.append_row([chat_id, "", "", ""])
-            CACHE["waiting_files"]["data"].append({"chat_id": chat_id, "file_id": "", "type": "", "doctor": ""})
+        _cache.pop(f"waiting_file_{chat_id}", None)
+        _cache.pop(f"waiting_data_{chat_id}", None)
 
 def set_waiting_file_fileid(chat_id, file_id, type_, doctor=None):
     with LOCK:
         sheet = client.open(GOOGLE_SHEET_NAME).worksheet("waiting_files")
-        all_rows = get_waiting_files_cached()
+        all_rows = sheet.get_all_records()
         for i, row in enumerate(all_rows, start=2):
             if str(row.get("chat_id")) == str(chat_id):
                 sheet.update(f"A{i}:D{i}", [[chat_id, file_id, type_, doctor or ""]])
-                # تحديث الكاش
-                row.update({"file_id": file_id, "type": type_, "doctor": doctor or ""})
+                _cache.pop(f"waiting_data_{chat_id}", None)
                 return
-        # إذا لم يوجد، أضف صف جديد
         sheet.append_row([chat_id, file_id, type_, doctor or ""])
-        CACHE["waiting_files"]["data"].append({"chat_id": chat_id, "file_id": file_id, "type": type_, "doctor": doctor or ""})
+        _cache.pop(f"waiting_data_{chat_id}", None)
 
 def set_waiting_file_doctor(chat_id, doctor):
     with LOCK:
         sheet = client.open(GOOGLE_SHEET_NAME).worksheet("waiting_files")
-        all_rows = get_waiting_files_cached()
+        all_rows = sheet.get_all_records()
         for i, row in enumerate(all_rows, start=2):
             if str(row.get("chat_id")) == str(chat_id):
                 sheet.update(f"D{i}:D{i}", [[doctor]])
-                row["doctor"] = doctor
+                _cache.pop(f"waiting_data_{chat_id}", None)
                 return
 
-def is_waiting_file(chat_id):
-    rows = get_waiting_files_cached()
-    return any(str(r.get("chat_id")) == str(chat_id) for r in rows)
+def is_waiting_file(chat_id, use_cache=False):
+    key = f"waiting_file_{chat_id}"
+    if use_cache:
+        cached = _get_cache(key)
+        if cached is not None:
+            return cached
+    with LOCK:
+        sheet = client.open(GOOGLE_SHEET_NAME).worksheet("waiting_files")
+        rows = sheet.get_all_records()
+        exists = any(str(r.get("chat_id")) == str(chat_id) for r in rows)
+    if use_cache:
+        _set_cache(key, exists)
+    return exists
 
-def get_waiting_file(chat_id):
-    rows = get_waiting_files_cached()
-    for r in rows:
-        if str(r.get("chat_id")) == str(chat_id):
-            return {"file_id": r.get("file_id"), "type": r.get("type"), "doctor": r.get("doctor")}
+def get_waiting_file(chat_id, use_cache=False):
+    key = f"waiting_data_{chat_id}"
+    if use_cache:
+        cached = _get_cache(key)
+        if cached:
+            return cached
+    with LOCK:
+        sheet = client.open(GOOGLE_SHEET_NAME).worksheet("waiting_files")
+        rows = sheet.get_all_records()
+        for r in rows:
+            if str(r.get("chat_id")) == str(chat_id):
+                result = {"file_id": r.get("file_id"), "type": r.get("type"), "doctor": r.get("doctor")}
+                if use_cache:
+                    _set_cache(key, result)
+                return result
     return None
