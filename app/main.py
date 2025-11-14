@@ -2,7 +2,7 @@ import os
 import requests
 import logging
 from fastapi import FastAPI, Header, HTTPException
-from app import crud  # CRUD للتعامل مع SQLite
+from app import crud  # CRUD يتعامل مع Google Sheets وفق التعديل السابق
 
 # ========= Logging مفصل =========
 logging.basicConfig(
@@ -25,7 +25,6 @@ async def startup():
     logger.info("✅ Database initialized successfully.")
 
 # ========= دوال مساعدة =========
-
 def send_message(chat_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
@@ -49,8 +48,7 @@ def send_file(chat_id, file_id, content_type="pdf"):
 def is_admin(user):
     return user.get("username") == ADMIN_USERNAME.replace("@", "")
 
-# ========= الكيبوردات =========
-
+# ========= القوائم =========
 def get_main_keyboard(is_admin=False):
     buttons = [[{"text": "ابدأ 🎓"}], [{"text": "تواصل مع المطور 👨‍💻"}]]
     if is_admin:
@@ -60,12 +58,12 @@ def get_main_keyboard(is_admin=False):
 def get_courses_keyboard():
     return {
         "keyboard": [
-            [{"text": "📘 Anatomy"}, {"text": "🧫 Pathology"}],
-            [{"text": "🔬 Histology"}, {"text": "🪱 Parasitology"}],
-            [{"text": "🧠 Physiology"}, {"text": "🧪 Biochemistry"}],
-            [{"text": "👶 Embryology"}, {"text": "🧫 Microbiology"}],
-            [{"text": "💊 Pharmacology"}],
-            [{"text": "🏠 القائمة الرئيسية"}, {"text": "⬅️ رجوع"}]
+            [{"text": "Anatomy"}, {"text": "Pathology"}],
+            [{"text": "Histology"}, {"text": "Parasitology"}],
+            [{"text": "Physiology"}, {"text": "Biochemistry"}],
+            [{"text": "Embryology"}, {"text": "Microbiology"}],
+            [{"text": "Pharmacology"}, {"text": "🏠 القائمة الرئيسية"}],
+            [{"text": "⬅️ رجوع"}]
         ],
         "resize_keyboard": True
     }
@@ -73,22 +71,32 @@ def get_courses_keyboard():
 def get_types_keyboard(course):
     return {
         "keyboard": [
-            [
-                {"text": f"{course} 📄 PDF"},
-                {"text": f"{course} 🎥 فيديو"},
-                {"text": f"{course} 📚 مرجع"}
-            ],
+            [{"text": f"{course} 📄 PDF"}, {"text": f"{course} 🎥 فيديو"}, {"text": f"{course} 📚 مرجع"}],
             [{"text": "⬅️ رجوع"}, {"text": "🏠 القائمة الرئيسية"}]
         ],
         "resize_keyboard": True
     }
 
-# ========= Webhook الرئيسي =========
+def make_doctors_keyboard(doctors):
+    # كيبورد أزرار الدكاترة (بشكل رسائل زر)
+    # نقسم الأسماء إلى صفوف كل صف زر واحد أو اثنين حسب الطول
+    kb = []
+    row = []
+    for i, d in enumerate(doctors, start=1):
+        row.append({"text": d})
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([{"text": "🏠 القائمة الرئيسية"}])
+    return {"keyboard": kb, "resize_keyboard": True}
 
+
+# ========= Webhook الرئيسي =========
 @app.post("/webhook")
 async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(None)):
     try:
-        # تحقق من توكن الحماية
         if WEBHOOK_SECRET_TOKEN and x_telegram_bot_api_secret_token != WEBHOOK_SECRET_TOKEN:
             logger.warning("Invalid secret token received.")
             raise HTTPException(status_code=401, detail="Invalid secret header")
@@ -102,10 +110,9 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         text = msg.get("text", "")
         user = msg.get("from", {})
 
-        # ========= التعامل مع الملفات =========
+        # ======= التقاط الملفات (مباشر أو forwarded) =======
         file_info = None
         content_type = None
-
         if "document" in msg:
             file_info = msg["document"]
             content_type = "pdf"
@@ -120,56 +127,68 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 file_info = msg["video"]
                 content_type = "video"
 
-        # ========= استقبال ملف من الأدمن =========
-        if file_info and is_admin(user):
-            file_id = file_info["file_id"]
-
-            send_message(
-                chat_id,
-                f"✅ تم استلام الملف بنجاح!\n"
-                f"📎 file_id:\n{file_id}\n\n"
-                f"لربطه بمقرر معين استخدم:\n"
-                f"/addfile <course> {content_type} {file_id}"
-            )
-            logger.info(f"Admin sent file: {file_id} (type={content_type})")
-            crud.set_waiting_file(chat_id, False)
+        # ----- 1) إذا الأدمن أرسل ملف أثناء وضع waiting -> احفظ file_id مؤقتًا واطلب اسم الدكتور
+        if file_info and crud.is_waiting_file(chat_id) and is_admin(user):
+            file_id = file_info.get("file_id")
+            crud.set_waiting_file_fileid(chat_id, file_id, content_type, doctor="")
+            send_message(chat_id, "✅ تم استلام الملف. الآن *اكتب اسم الدكتور* لهذا الملف (أرسله كرسالة نصية).")
             return {"ok": True}
 
-        # ========= أوامر الأدمن =========
-        if text.startswith("/addfile") and is_admin(user):
+        # ----- 2) إذا الأدمن أرسل ملف *وليس* في وضع waiting -> نقبل الملف فوريًا ونطلب اسم الدكتور ثم نكمل
+        if file_info and is_admin(user) and not crud.is_waiting_file(chat_id):
+            file_id = file_info.get("file_id")
+            crud.set_waiting_file(chat_id, True)
+            crud.set_waiting_file_fileid(chat_id, file_id, content_type, doctor="")
+            send_message(chat_id, "✅ تم استلام الملف. الآن *اكتب اسم الدكتور* لهذا الملف (أرسله كرسالة نصية).")
+            return {"ok": True}
+
+        # ----- 3) استقبال نص أثناء وجود waiting_file -> هذا النص نعتبره اسم الدكتور (مرحلة B)
+        if text and crud.is_waiting_file(chat_id) and is_admin(user):
+            waiting = crud.get_waiting_file(chat_id)
+            # إذا لم يوجد ملف_id بعد (غير منطقي لأن رفع الملف مطلوب) نخبر الأدمن
+            if not waiting or not waiting.get("file_id"):
+                send_message(chat_id, "❌ لم يتم استلام ملف بعد. أرسل الملف أولًا ثم اسم الدكتور.")
+                return {"ok": True}
+
+            # إذا doctor فارغ نعتبر النص هو اسم الدكتور وننتقل لطلب المقرر
+            if not waiting.get("doctor"):
+                doctor_name = text.strip()
+                crud.set_waiting_file_doctor(chat_id, doctor_name)
+                # الآن اطلب تحديد المقرر
+                send_message(chat_id, f"✅ تم تسجيل دكتور: *{doctor_name}*.\nاختر المقرر الذي تريد ربط الملف به:", reply_markup=get_courses_keyboard())
+                return {"ok": True}
+
+            # إذا doctor موجود ومع وجود نص قد يكون اختيار مقرر أو أوامر أخرى — يتم التعامل لاحقًا أدناه
+
+        # ======= أوامر الأدمن التقليدية =======
+        if text and text.startswith("/addfile") and is_admin(user):
             parts = text.split()
             if len(parts) == 4:
                 course, ctype, file_id = parts[1], parts[2], parts[3]
-                crud.add_material(course, ctype, file_id)
+                # إذا تم استخدام الأمر يدويًا، نحتاج doctor - نخزن كفارغ
+                crud.add_material(course, ctype, file_id, doctor=None)
                 send_message(chat_id, f"✅ تمت إضافة {ctype} لمادة {course} بنجاح!")
-                logger.info(f"Admin added file: course={course}, type={ctype}, file_id={file_id}")
             else:
                 send_message(chat_id, "❌ الصيغة الصحيحة:\n/addfile <course> <type> <file_id>")
             return {"ok": True}
 
         if text == "رفع ملف جديد 📤" and is_admin(user):
-            send_message(chat_id, "📤 أرسل الآن الملف (PDF / فيديو) للبوت، وسأعطيك file_id مباشرة.")
             crud.set_waiting_file(chat_id, True)
-            logger.info(f"Admin {user.get('username')} is uploading a file.")
+            send_message(chat_id, "📤 الآن أرسل الملف (PDF / فيديو) وسأطلب اسم الدكتور بعد الاستلام.")
             return {"ok": True}
 
-        # ========= أوامر المستخدم =========
-        if text.startswith("/start"):
-            send_message(
-                chat_id,
-                "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل\n\n"
-                "📚 هذا البوت صُمم لمساعدتك في الوصول إلى كل محتوى ومقررات الطب بسهولة:\n"
-                "📝 فيديوهات تعليمية\n"
-                "📄 ملفات PDF\n"
-                "📚 مراجع علمية\n\n"
-                "⚠️ تنويه: البوت حاليًا في مراحل الصيانة والتجهيز لتوفير كل المواد بأداء مستقر.\n"
-                "ᴮʸᴹᵍᵈᵃᵈ\n\n",
-                reply_markup=get_main_keyboard(is_admin(user))
+        # ======= أوامر المستخدم (واجهة) =======
+        if text and text.startswith("/start"):
+            welcome_text = (
+                "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل!\n\n"
+                "📚 هذا البوت يساعدك للوصول إلى محتوى المقررات بسهولة.\n"
+                "⚠️ تنويه: البوت في مراحل الصيانة لرفع كميات كبيرة من المواد.\n"
             )
+            send_message(chat_id, welcome_text, reply_markup=get_main_keyboard(is_admin(user)))
             return {"ok": True}
 
         if text == "تواصل مع المطور 👨‍💻":
-            send_message(chat_id, f"📩 يمكنك التواصل مع المطور عبر الحساب التالي:\n{ADMIN_USERNAME}")
+            send_message(chat_id, f"📩 تواصل مع المطور: {ADMIN_USERNAME}")
             return {"ok": True}
 
         if text == "🏠 القائمة الرئيسية":
@@ -184,36 +203,103 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             send_message(chat_id, "⬅️ رجعت لاختيار المقرر:", reply_markup=get_courses_keyboard())
             return {"ok": True}
 
-        # ========= أولاً: التحقق من نوع المحتوى =========
-        if any(x in text for x in ["PDF", "فيديو", "مرجع"]):
-            parts = text.split()
-            course_name = parts[0]
-            if "PDF" in text:
-                content_type = "pdf"
-            elif "فيديو" in text:
-                content_type = "video"
-            else:
-                content_type = "reference"
-
-            mat = crud.get_material(course_name, content_type)
-            if mat and mat.get("file_id"):
-                send_message(chat_id, f"📨 جارٍ إرسال {content_type} الخاص بمقرر {course_name}...")
-                send_file(chat_id, mat["file_id"], content_type)
-            else:
-                send_message(chat_id, "🚧 لم يتم العثور على هذا المحتوى بعد.")
-            return {"ok": True}
-
-        # ========= ثانيًا: التحقق من اختيار المقرر =========
+        # ======= اختيار نوع المحتوى أو اختيار المقرر في سياق waiting_file =======
+        # 1) إذا المستخدم ضغط اسم مقرر أثناء وجود waiting_file مع doctor => نرسل أنواع (PDF/فيديو/مرجع)
         course_names = [
             "Anatomy", "Pathology", "Histology", "Parasitology",
             "Physiology", "Biochemistry", "Embryology",
             "Microbiology", "Pharmacology"
         ]
-
-        if any(c in text for c in course_names):
-            course = next(c for c in course_names if c in text)
-            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {course}:", reply_markup=get_types_keyboard(course))
+        # المستخدم يختار مقرر (نصي)
+        if text and any(c == text for c in course_names) and crud.is_waiting_file(chat_id) and is_admin(user):
+            # نعرض أنواع المحتوى (كيبورد)
+            selected_course = text
+            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {selected_course}:", reply_markup=get_types_keyboard(selected_course))
             return {"ok": True}
+
+        # 2) إذا المستخدم يختار نوع المحتوى أثناء وجود waiting_file مع doctor => اكتمال الحفظ
+        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]) and crud.is_waiting_file(chat_id) and is_admin(user):
+            # نص النوع سيكون مثل "Anatomy 🎥 فيديو" أو "Anatomy 📄 PDF"
+            parts = text.split()
+            if not parts:
+                send_message(chat_id, "❌ لم أفهم نوع المحتوى.")
+                return {"ok": True}
+            course_name = parts[0]
+            if "PDF" in text:
+                ctype = "pdf"
+            elif "فيديو" in text:
+                ctype = "video"
+            else:
+                ctype = "reference"
+
+            waiting = crud.get_waiting_file(chat_id)
+            if not waiting or not waiting.get("file_id"):
+                send_message(chat_id, "❌ لم يتم العثور على الملف المؤقت. أعد العملية.")
+                return {"ok": True}
+
+            file_id = waiting.get("file_id")
+            doctor = waiting.get("doctor") or None
+
+            # أخيرًا: إضافة المادة في Google Sheet مع doctor
+            crud.add_material(course_name, ctype, file_id, doctor=doctor)
+            crud.set_waiting_file(chat_id, False)
+            send_message(chat_id, f"✅ تم حفظ الملف للمقرر *{course_name}* (type={ctype}) تحت الدكتور: {doctor or 'غير محدد'}")
+            return {"ok": True}
+
+        # ======= عند طلب المستخدم لمادة -> نعرض الدكاترة ثم نرسل الملفات عند اختيار الدكتور =======
+        # إذا المستخدم يطلب "Anatomy" إلخ (بدون waiting_file context)
+        if text and any(c == text for c in course_names):
+            # عرض اختيار النوع أولًا
+            selected_course = text
+            # نعرض أنواع المحتوى
+            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {selected_course}:", reply_markup=get_types_keyboard(selected_course))
+            return {"ok": True}
+
+        # عند اختيار النوع من المستخدم (ليس أدمن waiting) -> نعرض قائمة الدكاترة المتاحة كمجموعة أزرار
+        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]) and not crud.is_waiting_file(chat_id):
+            parts = text.split()
+            course_name = parts[0]
+            if "PDF" in text:
+                ctype = "pdf"
+            elif "فيديو" in text:
+                ctype = "video"
+            else:
+                ctype = "reference"
+
+            # جلب الدكاترة المتاحين لهذا course+type
+            doctors = crud.get_doctors_for_course_and_type(course_name, ctype)
+            if not doctors:
+                send_message(chat_id, "🚧 لم يتم العثور على دكاترة أو ملفات لهذا الاختيار بعد.")
+                return {"ok": True}
+
+            # إرسال كيبورد بأسماء الدكاترة
+            send_message(chat_id, f"👨‍🏫 اختر الدكتور لعرض ملفاته في {course_name} ({ctype}):", reply_markup=make_doctors_keyboard(doctors))
+            return {"ok": True}
+
+        # عند اختيار اسم الدكتور من المستخدم (نرسل الملفات الخاصة به)
+        # نتأكد أن النص ليس من أوامر أخرى وأنه يتطابق مع اسم دكتور مسجل في الورقة
+        if text:
+            # نجرب البحث في كل combination course+type+doctor: نحتاج سياق سابق: نأخذ آخر طلبات المستخدم (تبسيط) —
+            # طريقة بسيطة: نبحث عبر المواد إن وجد doctor مطابق، نرسل الملفات له
+            # (قد يكون هناك أسماء دكاترة متشابهة بين مواد، لكن عادة سيختار بعد تحديد مادة ونوع)
+            # سنبحث عن أي ملفات مطابقة لهذا الاسم عبر كل المواد ونرسلها
+            doctor_name = text.strip()
+            # جلب المواد التي تخص هذا الدكتور
+            # نبحث عبر كل المقررات والنوعين الشائعين
+            found_any = False
+            for course in course_names:
+                for ctype in ["pdf", "video", "reference"]:
+                    mats = crud.get_materials(course, ctype)
+                    for m in mats:
+                        if m.get("doctor") and m.get("doctor") == doctor_name:
+                            # وجدنا ملف لهذا الدكتور
+                            if not found_any:
+                                send_message(chat_id, f"📤 ملفات الدكتور {doctor_name}:")
+                                found_any = True
+                            send_file(chat_id, m.get("file_id"), content_type=ctype)
+            if found_any:
+                return {"ok": True}
+            # إن لم يكن اسم دكتور، تابع إلى الرد الافتراضي أدناه
 
         # ========= افتراضي =========
         send_message(chat_id, "🤔 لم أفهم الأمر، يرجى اختيار من القائمة.")
