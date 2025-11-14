@@ -1,6 +1,6 @@
 # 🌟 Telegram Bot for Medical Students 🌟
 
-![Bot Image](https://i.ibb.co/0RJqCnQP/2025-11-14-hp.jpg)  <!-- ضع هنا رابط الصورة أو المسار -->
+![Bot Image](https://i.postimg.cc/QNBdf4Q7/2025-11-14-hp.jpg)  <!-- ضع هنا رابط الصورة أو المسار -->
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![Telegram](https://img.shields.io/badge/Platform-Telegram-green)
