@@ -189,29 +189,30 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             "Microbiology", "Pharmacology"
         ]
 
-        if text and any(c == text for c in course_names) and crud.is_waiting_file(chat_id, use_cache=True) and is_admin(user):
-            selected_course = text
-            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {selected_course}:", reply_markup=get_types_keyboard(selected_course))
+        # اختيار المقرر الدراسي
+        if text and text in course_names:
+            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {text}:", reply_markup=get_types_keyboard(text))
             return {"ok": True}
 
-        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]) and crud.is_waiting_file(chat_id, use_cache=True) and is_admin(user):
+        # اختيار نوع الملف (PDF / فيديو / مرجع)
+        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]):
             course_name = text.split()[0]
             ctype = "pdf" if "PDF" in text else "video" if "فيديو" in text else "reference"
-            waiting = crud.get_waiting_file(chat_id, use_cache=True)
-            if not waiting or not waiting.get("file_id"):
-                send_message(chat_id, "❌ لم يتم العثور على الملف المؤقت. أعد العملية.")
+
+            # تحقق إذا كان الأدمن يرفع ملف مؤقت
+            if crud.is_waiting_file(chat_id, use_cache=True) and is_admin(user):
+                waiting = crud.get_waiting_file(chat_id, use_cache=True)
+                if not waiting or not waiting.get("file_id"):
+                    send_message(chat_id, "❌ لم يتم العثور على الملف المؤقت. أعد العملية.")
+                    return {"ok": True}
+                file_id = waiting.get("file_id")
+                doctor = waiting.get("doctor") or None
+                crud.add_material(course_name, ctype, file_id, doctor=doctor)
+                crud.set_waiting_file(chat_id, False)
+                send_message(chat_id, f"✅ تم حفظ الملف للمقرر *{course_name}* (type={ctype}) تحت الدكتور: {doctor or 'غير محدد'}")
                 return {"ok": True}
-            file_id = waiting.get("file_id")
-            doctor = waiting.get("doctor") or None
-            crud.add_material(course_name, ctype, file_id, doctor=doctor)
-            crud.set_waiting_file(chat_id, False)
-            send_message(chat_id, f"✅ تم حفظ الملف للمقرر *{course_name}* (type={ctype}) تحت الدكتور: {doctor or 'غير محدد'}")
-            return {"ok": True}
 
-        # طلب الملفات من المستخدم بدون تجاوز الحصة
-        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]) and not crud.is_waiting_file(chat_id, use_cache=True):
-            course_name = text.split()[0]
-            ctype = "pdf" if "PDF" in text else "video" if "فيديو" in text else "reference"
+            # طلب ملفات المستخدم
             doctors = crud.get_doctors_for_course_and_type(course_name, ctype, use_cache=True)
             if not doctors:
                 send_message(chat_id, "🚧 لم يتم العثور على دكاترة أو ملفات لهذا الاختيار بعد.")
