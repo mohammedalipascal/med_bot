@@ -28,6 +28,9 @@ async def startup():
 # هذا يسمح بتفادي قراءات خاطئة من الكاش أو Google Sheet خلال عملية رفع الملف
 WAITING_STATE = {}  # keyed by chat_id -> {"file_id":..., "doctor":..., "course":..., "type":...}
 
+# ========= حالة المستخدم لاختيار النوع والمقرر (حتى لا نرسل PDF + Video مع بعض) =========
+USER_STATE = {}  # keyed by chat_id -> {"course": ..., "type": ...}
+
 # ========= دوال مساعدة =========
 def send_message(chat_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -165,7 +168,8 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
 
         # ===== أوامر المستخدم =====
         if text == "/start":
-            # لا نغير أي نص
+            # امسح حالة المستخدم القديمة لو كانت موجودة
+            USER_STATE.pop(chat_id, None)
             welcome_text = (
                 "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل!\n\n"
                 "📚 هذا البوت يساعدك للوصول إلى محتوى المقررات بسهولة.\n"
@@ -179,6 +183,8 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             return {"ok": True}
 
         if text == "🏠 القائمة الرئيسية":
+            # امسح حالة المستخدم عند العودة للقائمة الرئيسية
+            USER_STATE.pop(chat_id, None)
             send_message(chat_id, "🏠 عدت إلى القائمة الرئيسية", reply_markup=get_main_keyboard(is_admin(user)))
             return {"ok": True}
 
@@ -187,6 +193,8 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             return {"ok": True}
 
         if text == "⬅️ رجوع":
+            # رجوع: نمسح حالة الاختيار للمستخدم
+            USER_STATE.pop(chat_id, None)
             send_message(chat_id, "⬅️ رجعت لاختيار المقرر:", reply_markup=get_courses_keyboard())
             return {"ok": True}
 
@@ -206,6 +214,8 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
 
         # اختيار المقرر الدراسي (للمستخدمين العاديين)
         if text and text in course_names:
+            # نمسح حالة سابقة ثم نعرض أنواع الملف (سيتم وضع النوع عند اختياره)
+            USER_STATE.pop(chat_id, None)
             send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {text}:", reply_markup=get_types_keyboard(text))
             return {"ok": True}
 
@@ -243,6 +253,9 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 return {"ok": True}
 
             # ثانيًا: المسار الطبيعي للمستخدم لعرض الدكاترة حسب النوع
+            # نسجل حالة المستخدم الحالية حتى نعرف النوع عند اختيار اسم الدكتور
+            USER_STATE[chat_id] = {"course": course_name, "type": ctype}
+
             doctors = crud.get_doctors_for_course_and_type(course_name, ctype, use_cache=True)
             if not doctors:
                 send_message(chat_id, "🚧 لم يتم العثور على دكاترة أو ملفات لهذا الاختيار بعد.")
@@ -250,11 +263,31 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             send_message(chat_id, f"👨‍🏫 اختر الدكتور لعرض ملفاته في {course_name} ({ctype}):", reply_markup=make_doctors_keyboard(doctors))
             return {"ok": True}
 
-        # اختيار اسم الدكتور (للمستخدمين العاديين) — يحترم نوع الملف المطلوب سابقًا؟
+        # اختيار اسم الدكتور (للمستخدمين العاديين) — الآن نحترم النوع الذي اختاره المستخدم سابقاً
         if text:
-            # لو الادمن يرسل اسم الدكتور أثناء الانتظار، كنا تعاملنا أعلاه؛ هنا المسار العام لباقي المستخدمين
+            # إذا الأدمن يرسل اسم الدكتور أثناء الانتظار، تعاملنا مع الحالة أعلاه؛ هنا المسار العام لباقي المستخدمين
             doctor_name = text.strip()
+
+            # أولًا: هل لدى المستخدم حالة مختارة (course + type)؟
+            state = USER_STATE.get(chat_id)
             found_any = False
+
+            if state:
+                # جلب المواد للمقرر والنوع المحددين فقط
+                course = state.get("course")
+                ctype = state.get("type")
+                if course and ctype:
+                    mats = crud.get_materials(course, ctype, use_cache=True)
+                    for m in mats:
+                        if m.get("doctor") == doctor_name:
+                            if not found_any:
+                                send_message(chat_id, f"📤 ملفات الدكتور {doctor_name}:")
+                                found_any = True
+                            send_file(chat_id, m.get("file_id"), content_type=ctype)
+                    if found_any:
+                        return {"ok": True}
+
+            # لو لا يوجد state أو لم نجد ملفات بالنوع المحدد، نرجع للسلوك القديم (نبحث في كل المقررات والأنواع)
             for course in course_names:
                 for ctype in ["pdf", "video", "reference"]:
                     mats = crud.get_materials(course, ctype, use_cache=True)
