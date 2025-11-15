@@ -220,12 +220,28 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             send_message(chat_id, f"👨‍🏫 اختر الدكتور لعرض ملفاته في {course_name} ({ctype}):", reply_markup=make_doctors_keyboard(doctors))
             return {"ok": True}
 
-        # اختيار اسم الدكتور
+        # ===== اختيار اسم الدكتور مع احترام نوع الملف الذي اختاره المستخدم =====
         if text:
             doctor_name = text.strip()
+
+            # حدد نوع الملف الذي كان المستخدم واقف عليه من زر الاختيار الأخير
+            selected_type = None
+            if "PDF" in text:
+                selected_type = "pdf"
+            elif "فيديو" in text:
+                selected_type = "video"
+            elif "مرجع" in text:
+                selected_type = "reference"
+
             found_any = False
+
+            # لو المستخدم كتب اسم الدكتور فقط، نستخدم الفلتر من اختيار النوع السابق
             for course in course_names:
                 for ctype in ["pdf", "video", "reference"]:
+                    # لو في نوع مختار نعرض ملفات الدكتور من نفس النوع فقط
+                    if selected_type and ctype != selected_type:
+                        continue
+
                     mats = crud.get_materials(course, ctype, use_cache=True)
                     for m in mats:
                         if m.get("doctor") == doctor_name:
@@ -233,6 +249,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                                 send_message(chat_id, f"📤 ملفات الدكتور {doctor_name}:")
                                 found_any = True
                             send_file(chat_id, m.get("file_id"), content_type=ctype)
+
             if found_any:
                 return {"ok": True}
 
