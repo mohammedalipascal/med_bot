@@ -1,6 +1,7 @@
 import os
 import requests
 import logging
+import time
 from fastapi import FastAPI, Header, HTTPException
 from app import crud  # CRUD يتعامل مع Google Sheets وفق التعديل الأخير
 
@@ -89,6 +90,27 @@ def make_doctors_keyboard(doctors):
         kb.append(row)
     kb.append([{"text": "🏠 القائمة الرئيسية"}])
     return {"keyboard": kb, "resize_keyboard": True}
+
+# ========= جلسات مؤقتة لتذكر اختيار المستخدم (course + ctype) =========
+SESSIONS = {}  # chat_id -> {"course": str, "ctype": str, "time": timestamp}
+SESSION_TTL = 300  # ثانية (5 دقائق)
+
+def _cleanup_sessions():
+    now = time.time()
+    to_delete = [cid for cid, s in SESSIONS.items() if now - s.get("time", 0) > SESSION_TTL]
+    for cid in to_delete:
+        SESSIONS.pop(cid, None)
+
+def set_session(chat_id, course, ctype):
+    SESSIONS[chat_id] = {"course": course, "ctype": ctype, "time": time.time()}
+
+def get_session(chat_id):
+    _cleanup_sessions()
+    return SESSIONS.get(chat_id)
+
+def clear_session(chat_id):
+    SESSIONS.pop(chat_id, None)
+
 
 # ========= Webhook =========
 @app.post("/webhook")
@@ -189,46 +211,72 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             "Microbiology", "Pharmacology"
         ]
 
-        # اختيار المقرر الدراسي
-        if text and text in course_names:
-            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {text}:", reply_markup=get_types_keyboard(text))
+        # المستخدم اختار مقرر أثناء وضع waiting_file (admin flow)
+        if text and any(c == text for c in course_names) and crud.is_waiting_file(chat_id, use_cache=True) and is_admin(user):
+            selected_course = text
+            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {selected_course}:", reply_markup=get_types_keyboard(selected_course))
             return {"ok": True}
 
-        # اختيار نوع الملف (PDF / فيديو / مرجع)
-        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]):
+        # المستخدم اختار نوع محتوى أثناء وجود waiting_file (admin completes upload)
+        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]) and crud.is_waiting_file(chat_id, use_cache=True) and is_admin(user):
             course_name = text.split()[0]
             ctype = "pdf" if "PDF" in text else "video" if "فيديو" in text else "reference"
-
-            # تحقق إذا كان الأدمن يرفع ملف مؤقت
-            if crud.is_waiting_file(chat_id, use_cache=True) and is_admin(user):
-                waiting = crud.get_waiting_file(chat_id, use_cache=True)
-                if not waiting or not waiting.get("file_id"):
-                    send_message(chat_id, "❌ لم يتم العثور على الملف المؤقت. أعد العملية.")
-                    return {"ok": True}
-                file_id = waiting.get("file_id")
-                doctor = waiting.get("doctor") or None
-                crud.add_material(course_name, ctype, file_id, doctor=doctor)
-                crud.set_waiting_file(chat_id, False)
-                send_message(chat_id, f"✅ تم حفظ الملف للمقرر *{course_name}* (type={ctype}) تحت الدكتور: {doctor or 'غير محدد'}")
+            waiting = crud.get_waiting_file(chat_id, use_cache=True)
+            if not waiting or not waiting.get("file_id"):
+                send_message(chat_id, "❌ لم يتم العثور على الملف المؤقت. أعد العملية.")
                 return {"ok": True}
+            file_id = waiting.get("file_id")
+            doctor = waiting.get("doctor") or None
+            crud.add_material(course_name, ctype, file_id, doctor=doctor)
+            crud.set_waiting_file(chat_id, False)
+            send_message(chat_id, f"✅ تم حفظ الملف للمقرر *{course_name}* (type={ctype}) تحت الدكتور: {doctor or 'غير محدد'}")
+            return {"ok": True}
 
-            # طلب ملفات المستخدم
+        # طلب الملفات من المستخدم بدون تجاوز الحصة: عرض كيبورد الدكاترة + حفظ session
+        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]) and not crud.is_waiting_file(chat_id, use_cache=True):
+            parts = text.split()
+            course_name = parts[0]
+            ctype = "pdf" if "PDF" in text else "video" if "فيديو" in text else "reference"
             doctors = crud.get_doctors_for_course_and_type(course_name, ctype, use_cache=True)
             if not doctors:
                 send_message(chat_id, "🚧 لم يتم العثور على دكاترة أو ملفات لهذا الاختيار بعد.")
                 return {"ok": True}
+            # حفظ الجلسة حتى يضغط المستخدم اسم الدكتور
+            set_session(chat_id, course_name, ctype)
             send_message(chat_id, f"👨‍🏫 اختر الدكتور لعرض ملفاته في {course_name} ({ctype}):", reply_markup=make_doctors_keyboard(doctors))
             return {"ok": True}
 
         # اختيار اسم الدكتور
         if text:
             doctor_name = text.strip()
+            # أولًا: نتحقق إن في جلسة سابقة (يعني المستخدم سبق واختار course+type)
+            sess = get_session(chat_id)
+            if sess:
+                # نستخدم السياق المضمون لإرسال ملفات نفس النوع فقط
+                course = sess.get("course")
+                ctype = sess.get("ctype")
+                mats = crud.get_materials(course, ctype, use_cache=True)
+                found_any = False
+                for m in mats:
+                    if m.get("doctor") and m.get("doctor") == doctor_name:
+                        if not found_any:
+                            send_message(chat_id, f"📤 ملفات الدكتور {doctor_name} في {course} ({ctype}):")
+                            found_any = True
+                        send_file(chat_id, m.get("file_id"), content_type=ctype)
+                clear_session(chat_id)
+                if found_any:
+                    return {"ok": True}
+                else:
+                    send_message(chat_id, "🚧 لم يتم العثور على ملفات لهذا الدكتور ضمن هذا النوع/المقرر.")
+                    return {"ok": True}
+
+            # إذا ما كانت هناك جلسة، نعود لطريقة البحث العامة (البحث عبر كل المقررات والنوع)
             found_any = False
             for course in course_names:
                 for ctype in ["pdf", "video", "reference"]:
                     mats = crud.get_materials(course, ctype, use_cache=True)
                     for m in mats:
-                        if m.get("doctor") == doctor_name:
+                        if m.get("doctor") and m.get("doctor") == doctor_name:
                             if not found_any:
                                 send_message(chat_id, f"📤 ملفات الدكتور {doctor_name}:")
                                 found_any = True
