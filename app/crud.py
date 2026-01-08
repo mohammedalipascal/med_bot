@@ -47,15 +47,15 @@ def init_db():
 
             sheet_titles = [s.title for s in spreadsheet.worksheets()]
 
-            # materials
+            # materials - الهيكل الجديد: semester, course, type, file_id, created_at
             if "materials" not in sheet_titles:
-                spreadsheet.add_worksheet(title="materials", rows=5000, cols=6)
+                spreadsheet.add_worksheet(title="materials", rows=5000, cols=5)
                 sheet = spreadsheet.worksheet("materials")
-                sheet.append_row(["course", "type", "file_id", "doctor", "created_at"])
+                sheet.append_row(["semester", "course", "type", "file_id", "created_at"])
             else:
                 sheet = spreadsheet.worksheet("materials")
                 header = sheet.row_values(1)
-                expected = ["course", "type", "file_id", "doctor", "created_at"]
+                expected = ["semester", "course", "type", "file_id", "created_at"]
                 if header[: len(expected)] != expected:
                     try:
                         sheet.delete_rows(1)
@@ -63,20 +63,20 @@ def init_db():
                         pass
                     sheet.insert_row(expected, 1)
 
-            # waiting_files
+            # waiting_files - الهيكل الجديد: chat_id, file_id, type, semester
             if "waiting_files" not in sheet_titles:
                 spreadsheet.add_worksheet(title="waiting_files", rows=1000, cols=4)
                 sheet2 = spreadsheet.worksheet("waiting_files")
-                sheet2.append_row(["chat_id", "file_id", "type", "doctor"])
+                sheet2.append_row(["chat_id", "file_id", "type", "semester"])
             else:
                 sheet2 = spreadsheet.worksheet("waiting_files")
                 header2 = sheet2.row_values(1)
-                if header2[:4] != ["chat_id", "file_id", "type", "doctor"]:
+                if header2[:4] != ["chat_id", "file_id", "type", "semester"]:
                     try:
                         sheet2.delete_rows(1)
                     except Exception:
                         pass
-                    sheet2.insert_row(["chat_id", "file_id", "type", "doctor"], 1)
+                    sheet2.insert_row(["chat_id", "file_id", "type", "semester"], 1)
 
             print("✅ Google Sheet جاهز للاستخدام")
 
@@ -84,38 +84,54 @@ def init_db():
             print(f"❌ خطأ أثناء التهيئة: {e}")
 
 # ========== مواد دائمة ==========
-def add_material(course, type_, file_id, doctor=None):
+def add_material(semester, course, type_, file_id):
+    """
+    إضافة مادة جديدة للنظام
+    semester: رقم الفصل (1, 2, 3, 4, 5)
+    course: اسم المقرر (Anatomy, Physiology, ...)
+    type_: نوع الملف (pdf, video, reference)
+    file_id: معرف الملف في تلجرام
+    """
     with LOCK:
         try:
             sheet = client.open(GOOGLE_SHEET_NAME).worksheet("materials")
             created_at = datetime.utcnow().isoformat()
-            sheet.append_row([course, type_, file_id, doctor or "", created_at])
+            sheet.append_row([semester, course, type_, file_id, created_at])
             # تحديث الكاش
             _cache.pop("materials", None)
+            _cache.pop(f"materials_{semester}_{course}_{type_}", None)
         except Exception as e:
             print(f"❌ خطأ أثناء إضافة المادة: {e}")
 
-def get_materials(course, type_, use_cache=False):
-    key = "materials"
+def get_materials(semester, course, type_, use_cache=False):
+    """
+    جلب المواد من قاعدة البيانات
+    """
+    key = f"materials_{semester}_{course}_{type_}"
+    
     if use_cache:
         cached = _get_cache(key)
         if cached:
-            rows = cached
-        else:
-            rows = _fetch_materials_from_sheet()
-            _set_cache(key, rows)
-    else:
-        rows = _fetch_materials_from_sheet()
+            return cached
+    
+    rows = _fetch_materials_from_sheet()
     results = [
-        {"course": row.get("course"), "type": row.get("type"),
-         "file_id": row.get("file_id"), "doctor": row.get("doctor"),
+        {"semester": row.get("semester"), "course": row.get("course"),
+         "type": row.get("type"), "file_id": row.get("file_id"),
          "created_at": row.get("created_at")}
         for row in rows
-        if str(row.get("course")) == str(course) and str(row.get("type")) == str(type_)
+        if str(row.get("semester")) == str(semester) 
+        and str(row.get("course")) == str(course) 
+        and str(row.get("type")) == str(type_)
     ]
+    
+    if use_cache:
+        _set_cache(key, results)
+    
     return results
 
 def _fetch_materials_from_sheet():
+    """جلب جميع المواد من الورقة"""
     with LOCK:
         try:
             sheet = client.open(GOOGLE_SHEET_NAME).worksheet("materials")
@@ -124,34 +140,19 @@ def _fetch_materials_from_sheet():
             print(f"❌ خطأ أثناء جلب المواد: {e}")
             return []
 
-def get_doctors_for_course_and_type(course, type_, use_cache=False):
-    key = f"doctors_{course}_{type_}"
-    if use_cache:
-        cached = _get_cache(key)
-        if cached:
-            return cached
-    rows = _fetch_materials_from_sheet()
-    doctors = []
-    for row in rows:
-        if str(row.get("course")) == str(course) and str(row.get("type")) == str(type_):
-            d = row.get("doctor") or ""
-            if d and d not in doctors:
-                doctors.append(d)
-    if use_cache:
-        _set_cache(key, doctors)
-    return doctors
-
 # ======= الملفات المؤقتة =======
 def set_waiting_file(chat_id, flag):
+    """تعيين أو إلغاء حالة انتظار ملف"""
     with LOCK:
         sheet = client.open(GOOGLE_SHEET_NAME).worksheet("waiting_files")
         all_rows = sheet.get_all_records()
         if not flag:
             new_rows = [r for r in all_rows if str(r.get("chat_id")) != str(chat_id)]
             sheet.clear()
-            sheet.append_row(["chat_id", "file_id", "type", "doctor"])
+            sheet.append_row(["chat_id", "file_id", "type", "semester"])
             for row in new_rows:
-                sheet.append_row([row.get("chat_id"), row.get("file_id"), row.get("type"), row.get("doctor") or ""])
+                sheet.append_row([row.get("chat_id"), row.get("file_id"), 
+                                row.get("type"), row.get("semester") or ""])
         else:
             for r in all_rows:
                 if str(r.get("chat_id")) == str(chat_id):
@@ -160,29 +161,32 @@ def set_waiting_file(chat_id, flag):
         _cache.pop(f"waiting_file_{chat_id}", None)
         _cache.pop(f"waiting_data_{chat_id}", None)
 
-def set_waiting_file_fileid(chat_id, file_id, type_, doctor=None):
+def set_waiting_file_fileid(chat_id, file_id, type_, semester=None):
+    """تحديث معلومات الملف المؤقت"""
     with LOCK:
         sheet = client.open(GOOGLE_SHEET_NAME).worksheet("waiting_files")
         all_rows = sheet.get_all_records()
         for i, row in enumerate(all_rows, start=2):
             if str(row.get("chat_id")) == str(chat_id):
-                sheet.update(f"A{i}:D{i}", [[chat_id, file_id, type_, doctor or ""]])
+                sheet.update(f"A{i}:D{i}", [[chat_id, file_id, type_, semester or ""]])
                 _cache.pop(f"waiting_data_{chat_id}", None)
                 return
-        sheet.append_row([chat_id, file_id, type_, doctor or ""])
+        sheet.append_row([chat_id, file_id, type_, semester or ""])
         _cache.pop(f"waiting_data_{chat_id}", None)
 
-def set_waiting_file_doctor(chat_id, doctor):
+def set_waiting_file_semester(chat_id, semester):
+    """تحديث السمستر للملف المؤقت"""
     with LOCK:
         sheet = client.open(GOOGLE_SHEET_NAME).worksheet("waiting_files")
         all_rows = sheet.get_all_records()
         for i, row in enumerate(all_rows, start=2):
             if str(row.get("chat_id")) == str(chat_id):
-                sheet.update(f"D{i}:D{i}", [[doctor]])
+                sheet.update(f"D{i}:D{i}", [[semester]])
                 _cache.pop(f"waiting_data_{chat_id}", None)
                 return
 
 def is_waiting_file(chat_id, use_cache=False):
+    """التحقق من وجود حالة انتظار"""
     key = f"waiting_file_{chat_id}"
     if use_cache:
         cached = _get_cache(key)
@@ -197,6 +201,7 @@ def is_waiting_file(chat_id, use_cache=False):
     return exists
 
 def get_waiting_file(chat_id, use_cache=False):
+    """جلب بيانات الملف المؤقت"""
     key = f"waiting_data_{chat_id}"
     if use_cache:
         cached = _get_cache(key)
@@ -207,7 +212,8 @@ def get_waiting_file(chat_id, use_cache=False):
         rows = sheet.get_all_records()
         for r in rows:
             if str(r.get("chat_id")) == str(chat_id):
-                result = {"file_id": r.get("file_id"), "type": r.get("type"), "doctor": r.get("doctor")}
+                result = {"file_id": r.get("file_id"), "type": r.get("type"), 
+                         "semester": r.get("semester")}
                 if use_cache:
                     _set_cache(key, result)
                 return result
